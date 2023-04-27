@@ -31,22 +31,3 @@ type Document struct {
 	DocumentURL string    `json:"document_url"`
 	Timestamp   string    `json:"timeStamp"`
 }
-
-// assign arguments to a newuser and creates a newuser
-// func NewUser(mobileNo, password, bio string) (*User, error) {
-// 	id, err := uuid.NewRandom()
-
-// 	if err != nil {
-// 		return nil, err
-// 	}
-
-// 	return &User{
-// 		ID:        id,
-// 		MobileNo:  mobileNo,
-// 		Password:  password,
-// 		Bio:  bio,
-// 		CreatedAt: time.Now(),
-// 		UpdatedAt: time.Now(),
-// 	}, nil
-
-// }
