@@ -6,20 +6,12 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
-	// "github.com/gorilla/websocket"
 	"poc/task/handlers"
 	"poc/task/websocket"
-	// "path/filepath"
-	// "context"
-	// "cloud.google.com/go/storage"
-	// "github.com/gorilla/mux"
-	// "google.golang.org/api/option"
+
 )
 
-// var upgrader = websocket.Upgrader{
-// 	ReadBufferSize:  1024,
-// 	WriteBufferSize: 1024,
-// }
+
 
 func main() {
 	log.Printf("Server Started on:%d", 8080)
