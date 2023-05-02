@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
+
 	"poc/task/handlers"
 	"poc/task/websocket"
 
@@ -29,5 +30,7 @@ func main() {
 	r.HandleFunc("/outboxDocument", handlers.HandleOutboxDocuments).Methods("GET")
 
 	log.Fatal(http.ListenAndServe(":8080", r))
-	go websocket.BroadcastMessages()
+	room := websocket.NewRoom()
+	go websocket.StartRoom(room)
+
 }
