@@ -1,23 +1,24 @@
 package websocket
 
 import (
-	// "encoding/json"
-	"unicode"
+	
 
-	"fmt"
 	"log"
 	"net/http"
 	"strings"
 	"time"
 
-	"bufio"
-	"os"
+	"bytes"
 	"poc/task/auth"
 
 	"github.com/golang-jwt/jwt"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
-	// "golang.org/x/text/message"
+	
+)
+
+var (
+	rooms = make(map[string]*Room)
 )
 
 var upgrader = websocket.Upgrader{
@@ -37,15 +38,50 @@ var upgrader = websocket.Upgrader{
 }
 
 type Client struct {
-	conn          *websocket.Conn
-	send          chan []byte
-	mobile_number string
+	conn          *websocket.Conn // WebSocket connection
+	send          chan []byte     // Channel for sending messages to the client
+	mobile_number string          // Mobile number associated with the client
 }
 
-var (
-	clients   = make(map[*Client]bool)
-	broadcast = make(chan []byte)
-)
+type Room struct {
+	clients   map[*Client]bool
+	broadcast chan []byte
+}
+
+func NewRoom() *Room {
+	return &Room{
+		clients:   make(map[*Client]bool),
+		broadcast: make(chan []byte),
+	}
+}
+
+func (r *Room) Start() {
+	for {
+		select {
+		case message := <-r.broadcast:
+			for client := range r.clients {
+				select {
+				case client.send <- message:
+				default:
+					close(client.send)
+					delete(r.clients, client)
+				}
+			}
+		}
+	}
+}
+
+func (r *Room) Join(client *Client) {
+	r.clients[client] = true
+}
+
+func getRoomName(mobileNumber1 string, mobileNumber2 string) string {
+	if mobileNumber1 < mobileNumber2 {
+		return mobileNumber1 + "-" + mobileNumber2
+	} else {
+		return mobileNumber2 + "-" + mobileNumber1
+	}
+}
 
 func HandleWebsocket(w http.ResponseWriter, r *http.Request) {
 	// Parse and validate the JWT token...
@@ -60,7 +96,7 @@ func HandleWebsocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid token", http.StatusUnauthorized)
 		return
 	}
-	mobileNumber, ok := token.Claims.(jwt.MapClaims)["mobile_number"].(string)
+	mobileNumber1, ok := token.Claims.(jwt.MapClaims)["mobile_number"].(string)
 	if !ok {
 		http.Error(w, "Invalid token", http.StatusUnauthorized)
 		return
@@ -68,7 +104,7 @@ func HandleWebsocket(w http.ResponseWriter, r *http.Request) {
 
 	// Get the receiver_number parameter from the URL
 	vars := mux.Vars(r)
-	receiverNumber, ok := vars["receiver_number"]
+	mobileNumber2, ok := vars["receiver_number"]
 	if !ok {
 		http.Error(w, "Missing receiver_number parameter", http.StatusBadRequest)
 		return
@@ -81,42 +117,43 @@ func HandleWebsocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create a new client and add it to the list of clients
-	client := &Client{conn: conn, send: make(chan []byte, 256), mobile_number: mobileNumber}
-	clients[client] = true
+	// Create a new client and add it to the list of clients in the room
+	client := &Client{conn: conn, send: make(chan []byte, 256), mobile_number: mobileNumber1}
+	roomName := getRoomName(mobileNumber1, mobileNumber2)
+	room, ok := rooms[roomName]
+	if !ok {
+		room = NewRoom()
+		rooms[roomName] = room
+		go room.Start()
+	}
+	room.Join(client)
 
 	// Start a goroutine to read incoming messages from the client
 	go func() {
 		defer func() {
 			client.conn.Close()
-			delete(clients, client)
+			room.broadcast <- []byte(client.mobile_number + " left the chat")
+			delete(room.clients, client)
+			if len(room.clients) == 0 {
+				delete(rooms, roomName)
+			}
 		}()
+
+		room.broadcast <- []byte(client.mobile_number + " joined the chat")
 
 		for {
 			_, message, err := client.conn.ReadMessage()
 			if err != nil {
-				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway) {
-					log.Printf("WebSocket error: %v\n", err)
+				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+					log.Printf("error: %v", err)
 				}
 				break
 			}
-
-			// Check if the message is intended for a specific client
-			if len(message) >= 2 && message[0] == '/' && unicode.IsDigit(rune(message[1])) {
-				receiver := string(message[1:])
-				if receiver != receiverNumber {
-					continue
-				}
-				for c := range clients {
-					if c.mobile_number == receiver {
-						c.send <- message[2:]
-						break
-					}
-				}
-			} else {
-				// Broadcast the message to all clients
-				broadcast <- message
+			message = bytes.TrimSpace(message)
+			if len(message) == 0 {
+				continue
 			}
+			room.broadcast <- []byte(client.mobile_number + ": " + string(message))
 		}
 	}()
 
@@ -124,77 +161,36 @@ func HandleWebsocket(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer func() {
 			client.conn.Close()
-			delete(clients, client)
 		}()
+
 		for {
 			select {
 			case message, ok := <-client.send:
 				if !ok {
+					client.conn.WriteMessage(websocket.CloseMessage, []byte{})
 					return
 				}
 				err := client.conn.WriteMessage(websocket.TextMessage, message)
 				if err != nil {
-					log.Printf("Error writing message to connection: %v\n", err)
 					return
 				}
-			case message := <-broadcast:
-				err := client.conn.WriteMessage(websocket.TextMessage, message)
-				if err != nil {
-					log.Printf("Error writing message to connection: %v\n", err)
-					return
-				}
-			}
-		}
-	}()
-
-	// Send and receive messages via wscat
-	go func() {
-		for {
-			reader := bufio.NewReader(os.Stdin)
-			fmt.Print("Enter message: ")
-			message, _ := reader.ReadString('\n')
-			message = strings.TrimSpace(message)
-			if len(message) > 0 {
-				err := conn.WriteMessage(websocket.TextMessage, []byte(message))
-				// Add authentication header to the message
-				authHeader := http.Header{}
-				authHeader.Set("Authorization", "Bearer "+tokenString)
-
-				err = conn.WriteMessage(websocket.TextMessage, []byte(message))
-				if err != nil {
-					log.Printf("Error writing message to connection: %v\n", err)
-					return
-				}
-
-				// Read incoming messages from the server
-				_, serverMessage, err := conn.ReadMessage()
-				if err != nil {
-					log.Printf("Error reading message from connection: %v\n", err)
-					return
-				}
-
-				log.Printf("Received message from server: %s\n", serverMessage)
 			}
 		}
 	}()
 }
 
-func BroadcastMessages() {
-	fmt.Println("at-14.")
+func StartRoom(room *Room) {
 	for {
-		fmt.Println("at-15.")
-		message := <-broadcast
-		for client := range clients {
-			fmt.Println("at-16.")
-			select {
-			case client.send <- message:
-			default:
-				close(client.send)
-				delete(clients, client)
+		select {
+		case message := <-room.broadcast:
+			for client := range room.clients {
+				select {
+				case client.send <- message:
+				default:
+					close(client.send)
+					delete(room.clients, client)
+				}
 			}
-			fmt.Println("at-17.")
 		}
-		fmt.Println("at-18.")
 	}
 }
-
